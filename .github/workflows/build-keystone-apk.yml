@@ -1,0 +1,71 @@
+name: Build Monero One Hardware APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout integration
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Clone Monero One
+        run: git clone --recurse-submodules https://github.com/bwgh0/MoneroOne.Android.git MoneroOne
+
+      - name: Apply Keystone integration
+        run: python3 tools/moneroone-keystone/patch.py MoneroOne
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        working-directory: MoneroOne
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Collect APK and checksum
+        run: |
+          cp MoneroOne/app/build/outputs/apk/debug/app-debug.apk MoneroOne-Hardware-Keystone-debug.apk
+          sha256sum MoneroOne-Hardware-Keystone-debug.apk | tee MoneroOne-Hardware-Keystone-debug.apk.sha256
+
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoneroOne-Hardware-Keystone-debug
+          path: |
+            MoneroOne-Hardware-Keystone-debug.apk
+            MoneroOne-Hardware-Keystone-debug.apk.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="keystone-test-v0.1"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "Monero One Hardware - Keystone test v0.1" \
+              --notes "Experimental debug build for physical Keystone / Feather-compatible Monero QR signing tests. The private spend key remains on Keystone. Use only a tiny test amount until the complete hardware round-trip is validated." \
+              --prerelease
+          fi
+          gh release upload "$TAG" \
+            MoneroOne-Hardware-Keystone-debug.apk \
+            MoneroOne-Hardware-Keystone-debug.apk.sha256 \
+            --clobber
