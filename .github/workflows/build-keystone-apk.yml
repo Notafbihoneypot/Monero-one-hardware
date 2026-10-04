@@ -57,12 +57,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="keystone-test-v0.4"
+          TAG="keystone-test-v0.5"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --target "$GITHUB_SHA" \
-              --title "Monero One Hardware - Keystone test v0.4" \
-              --notes "Keystone test v0.4: adds an explicit restore-height override during direct Keystone pairing because Keystone currently hardcodes restoreHeight=0 in its Monero connection QR. Monero One now requires a restore height before pairing and persists that value. Includes the v0.3 pairing verification and v0.2 sync-performance fixes. Experimental debug build; use only a tiny test amount until the complete hardware round-trip is validated." \
+              --title "Monero One Hardware - Keystone test v0.5" \
+              --notes "Keystone test v0.5: fixes severe animated-QR flicker by retaining the previous rendered QR until the next UR frame is ready, instead of flashing a blank/loading state between frames. The phone-to-Keystone animation is also slowed slightly for steadier scanning. Includes the v0.4 restore-height override, v0.3 pairing verification, and v0.2 sync-performance fixes. Experimental debug build; use only a tiny test amount until the complete hardware round-trip is validated." \
               --prerelease
           fi
           gh release upload "$TAG" \
