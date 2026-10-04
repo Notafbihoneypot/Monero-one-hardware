@@ -55,6 +55,7 @@ fun KeystonePairScreen(
 
     var scanning by remember { mutableStateOf(false) }
     var pairing by remember { mutableStateOf<KeystonePairing?>(null) }
+    var restoreHeightInput by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
 
@@ -91,10 +92,12 @@ fun KeystonePairScreen(
                             .weight(1f),
                         onDecoded = { payload ->
                             try {
-                                pairing = when (payload) {
+                                val decoded = when (payload) {
                                     is KeystoneScanPayload.Text -> parseKeystonePairingText(payload.value)
                                     is KeystoneScanPayload.Ur -> parseKeystonePairing(payload.bytes)
                                 }
+                                pairing = decoded
+                                restoreHeightInput = decoded.restoreHeight.takeIf { it > 0L }?.toString().orEmpty()
                                 error = null
                                 scanning = false
                             } catch (e: Exception) {
@@ -162,20 +165,54 @@ fun KeystonePairScreen(
                                     style = MaterialTheme.typography.bodySmall
                                 )
                                 Text(
-                                    "Restore height: " + current.restoreHeight,
+                                    if (current.restoreHeight == 0L) {
+                                        "Keystone reports restore height 0. Enter the correct scan height below."
+                                    } else {
+                                        "Keystone reported restore height: " + current.restoreHeight
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
                         Spacer(Modifier.height(14.dp))
+                        androidx.compose.material3.OutlinedTextField(
+                            value = restoreHeightInput,
+                            onValueChange = { value ->
+                                restoreHeightInput = value.filter { it.isDigit() }.take(10)
+                                error = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Restore height") },
+                            placeholder = { Text("Enter block height") },
+                            supportingText = {
+                                Text(
+                                    if (current.restoreHeight == 0L) {
+                                        "Keystone's Monero QR hardcodes 0. Monero One will use the height entered here."
+                                    } else {
+                                        "You can override the height supplied by the QR."
+                                    }
+                                )
+                            },
+                            singleLine = true,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                            )
+                        )
+                        Spacer(Modifier.height(14.dp))
                         PrimaryButton(
                             onClick = {
                                 busy = true
                                 error = null
+                                val restoreHeight = restoreHeightInput.toLongOrNull()
+                                if (restoreHeight == null || restoreHeight < 0L) {
+                                    busy = false
+                                    error = "Enter a valid restore height before pairing."
+                                    return@PrimaryButton
+                                }
                                 scope.launch {
                                     val added = walletViewModel.addKeystoneWallet(
-                                        pairing = current,
+                                        pairing = current.copy(restoreHeight = restoreHeight),
                                         flowId = flowId,
                                         name = current.walletName
                                     )
@@ -185,13 +222,13 @@ fun KeystonePairScreen(
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = !busy
+                            enabled = !busy && restoreHeightInput.isNotBlank()
                         ) {
                             Text(if (busy) "Adding..." else if (isAddingWallet) "Add Keystone Wallet" else "Use Keystone Wallet")
                         }
                         Spacer(Modifier.height(10.dp))
                         androidx.compose.material3.TextButton(
-                            onClick = { pairing = null; scanning = true },
+                            onClick = { pairing = null; restoreHeightInput = ""; scanning = true },
                             enabled = !busy
                         ) { Text("Scan again") }
                     }
