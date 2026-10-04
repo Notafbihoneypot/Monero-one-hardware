@@ -54,6 +54,42 @@ rep(
 # MoneroKit was initialized with a later restore height.
 # ---------------------------------------------------------------------------
 monero_kit = "monero-kit-android/monerokit/src/main/java/io/horizontalsystems/monerokit/MoneroKit.kt"
+
+# Capture the identity wallet2 actually opens before any daemon operation can
+# fail. Direct Keystone pairing uses these values as the authoritative check.
+rep(
+    monero_kit,
+r'''    @Volatile
+    var checkedWalletFilePrimaryAddress: String? = null
+        private set
+''',
+r'''    @Volatile
+    var checkedWalletFilePrimaryAddress: String? = null
+        private set
+
+    @Volatile
+    var checkedWalletFilePrivateViewKey: String? = null
+        private set
+'''
+)
+rep(
+    monero_kit,
+r'''        checkedWalletFilePrimaryAddress = null
+        try {
+''',
+r'''        checkedWalletFilePrimaryAddress = null
+        checkedWalletFilePrivateViewKey = null
+        try {
+'''
+)
+rep(
+    monero_kit,
+r'''            checkedWalletFilePrimaryAddress = walletService.withWallet { it.getSubaddress(0, 0) }
+''',
+r'''            checkedWalletFilePrimaryAddress = walletService.withWallet { it.getSubaddress(0, 0) }
+            checkedWalletFilePrivateViewKey = walletService.withWallet { it.secretViewKey }
+'''
+)
 rep(
     monero_kit,
     "    private var lastStoreHeight: Long = 0\n",
@@ -514,9 +550,10 @@ keystone_add = r'''
             val previousActive = _activeWallet.value
             var persisted: WalletInfo? = null
             try {
+                // Validate the address shape up front, then let wallet2's real
+                // create/open path be authoritative for this address + view-key pair.
                 withContext(Dispatchers.Default) {
                     MoneroKit.validateAddress(pairing.primaryAddress)
-                    MoneroKit.validatePrivateViewKey(pairing.privateViewKey, pairing.primaryAddress)
                 }
 
                 val derived = WalletCacheIds.watchOnlyWalletId(pairing.primaryAddress, 0)
@@ -525,6 +562,13 @@ keystone_add = r'''
                 }?.let { throw DuplicateWalletException(it.name) }
 
                 snapshotActiveWalletCache()
+
+                // A previous failed/debug pairing can leave orphaned native cache files
+                // under this deterministic id. Delete them so stale .keys data can never
+                // override the freshly scanned Keystone pairing payload.
+                withContext(Dispatchers.IO) {
+                    MoneroKit.deleteWallet(context, derived)
+                }
 
                 val info = WalletInfo(
                     id = UUID.randomUUID().toString(),
@@ -571,6 +615,22 @@ keystone_add = r'''
                 }
                 publishAddresses(info, kit)
                 WalletManager.start()
+
+                // startInternal captures local wallet identity immediately after opening
+                // the wallet file, before daemon setup. This remains available even when
+                // the selected node is temporarily unreachable.
+                val openedAddress = kit.checkedWalletFilePrimaryAddress
+                val openedViewKey = kit.checkedWalletFilePrivateViewKey
+                check(openedAddress == pairing.primaryAddress) {
+                    "Keystone pairing failed: wallet2 opened a different primary address. Scan the normal Monero/Feather connection QR again."
+                }
+                check(
+                    openedViewKey != null &&
+                        openedViewKey.equals(pairing.privateViewKey, ignoreCase = true)
+                ) {
+                    "Keystone pairing failed: wallet2 opened a different private view key. Scan the normal Monero/Feather connection QR again."
+                }
+
                 val startState = kit.syncStateFlow.value
                 if (startState is SyncState.NotSynced && isWalletLevelStartError(startState.error)) {
                     throw WalletOpenException(startState.error.message ?: "Keystone wallet could not be opened")
