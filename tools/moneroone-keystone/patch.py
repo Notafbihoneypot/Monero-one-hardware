@@ -106,17 +106,37 @@ r'''            // Persist enough progress to survive interruption without seria
 ''')
 rep(
     monero_kit,
-r'''                checkAndCloseWallet(newWallet)
+r'''            is Seed.WatchOnly -> {
+                val newWallet = WalletManager.getInstance().createWalletWithKeys(
+                    /* aFile = */ newWalletFile,
+                    /* password = */ walletPassword,
+                    /* language = */ "",
+                    /* restoreHeight = */ creationHeight,
+                    /* addressString = */ seed.address,
+                    /* viewKeyString = */ seed.viewPrivateKey,
+                    /* spendKeyString = */ ""
+                )
+
+                checkAndCloseWallet(newWallet)
             }
 ''',
-r'''                // createWalletFromKeys may report/persist a zero restore height for
+r'''            is Seed.WatchOnly -> {
+                val newWallet = WalletManager.getInstance().createWalletWithKeys(
+                    /* aFile = */ newWalletFile,
+                    /* password = */ walletPassword,
+                    /* language = */ "",
+                    /* restoreHeight = */ creationHeight,
+                    /* addressString = */ seed.address,
+                    /* viewKeyString = */ seed.viewPrivateKey,
+                    /* spendKeyString = */ ""
+                )
+
+                // createWalletFromKeys may report/persist a zero restore height for
                 // view-only wallets. Set it explicitly before the keys file is closed.
                 newWallet.setRestoreHeight(creationHeight)
                 checkAndCloseWallet(newWallet)
             }
-''',
-    1
-)
+''')
 
 wallet_service_fast = "monero-kit-android/monerokit/src/main/java/io/horizontalsystems/monerokit/WalletService.kt"
 rep(
