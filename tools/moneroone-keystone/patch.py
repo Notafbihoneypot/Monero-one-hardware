@@ -42,6 +42,160 @@ rep(
 )
 
 # ---------------------------------------------------------------------------
+# Fast-sync hardening.
+#
+# A freshly paired hardware/view-only wallet can scan millions of blocks. The
+# upstream kit currently serializes the wallet cache every 2,000 blocks and
+# rebuilds transaction history every ~2 seconds while catching up. On Android
+# that creates heavy disk I/O, allocation/GC churn and Compose jank.
+#
+# Also enforce the requested restore height for watch-only wallets. wallet2 can
+# reopen a partially-created view-only cache with restoreHeight=0 even though
+# MoneroKit was initialized with a later restore height.
+# ---------------------------------------------------------------------------
+monero_kit = "monero-kit-android/monerokit/src/main/java/io/horizontalsystems/monerokit/MoneroKit.kt"
+rep(
+    monero_kit,
+    "    private var lastStoreHeight: Long = 0\n",
+    "    private var lastStoreHeight: Long = 0\n    private var lastStoreTimeMs: Long = 0\n"
+)
+rep(
+    monero_kit,
+r'''        val historyAll: List<TransactionInfo?>? = wallet.history.all
+
+        if (historyAll != null) {
+            _allTransactionsFlow.update {
+                historyAll.mapNotNull { it }
+            }
+        }
+''',
+r'''        // Reading and mapping the entire history on every sync callback creates
+        // substantial allocation/GC pressure while scanning. Only refresh the public
+        // transaction list when the listener detected a history change or at final sync.
+        if (full || wallet.isSynchronized) {
+            val historyAll: List<TransactionInfo?>? = wallet.history.all
+            if (historyAll != null) {
+                _allTransactionsFlow.update {
+                    historyAll.mapNotNull { it }
+                }
+            }
+        }
+''')
+rep(
+    monero_kit,
+r'''            // Periodically store wallet state during sync (every 2000 blocks)
+            if (walletHeight - lastStoreHeight >= 2000) {
+                if (!savingState.getAndSet(true)) {
+                    walletService.storeWallet()
+                    savingState.set(false)
+                    lastStoreHeight = walletHeight
+                }
+            }
+''',
+r'''            // Persist enough progress to survive interruption without serializing a
+            // multi-megabyte wallet every couple of seconds on a fast initial scan.
+            val now = System.currentTimeMillis()
+            if (walletHeight - lastStoreHeight >= 25_000 && now - lastStoreTimeMs >= 15_000) {
+                if (!savingState.getAndSet(true)) {
+                    walletService.storeWallet()
+                    savingState.set(false)
+                    lastStoreHeight = walletHeight
+                    lastStoreTimeMs = now
+                }
+            }
+''')
+rep(
+    monero_kit,
+r'''                checkAndCloseWallet(newWallet)
+            }
+''',
+r'''                // createWalletFromKeys may report/persist a zero restore height for
+                // view-only wallets. Set it explicitly before the keys file is closed.
+                newWallet.setRestoreHeight(creationHeight)
+                checkAndCloseWallet(newWallet)
+            }
+''',
+    1
+)
+
+wallet_service_fast = "monero-kit-android/monerokit/src/main/java/io/horizontalsystems/monerokit/WalletService.kt"
+rep(
+    wallet_service_fast,
+r'''        if (restoreHeight != null) {
+            val height = wallet.blockChainHeight
+            if (height <= 1) {
+                val from = restoreHeight.coerceAtLeast(0)
+                val initFrom = wallet.restoreHeight
+                if (initFrom != from) Timber.w("wallet at height %d: scan from %d, not %d", height, from, initFrom)
+                wallet.setRestoreHeight(from)
+            }
+        }
+''',
+r'''        if (restoreHeight != null) {
+            val height = wallet.blockChainHeight
+            val from = restoreHeight.coerceAtLeast(0)
+            val initFrom = wallet.restoreHeight
+            // A partially scanned view-only cache can reopen with restoreHeight=0.
+            // If it is still below the requested scan start, enforce the caller's
+            // restore height instead of continuing an unnecessary genesis scan.
+            if (initFrom != from && (height <= 1 || height < from)) {
+                Timber.w("wallet at height %d: scan from %d, not %d", height, from, initFrom)
+                wallet.setRestoreHeight(from)
+            }
+        }
+''')
+rep(
+    wallet_service_fast,
+r'''        private var lastBlockTime = 0L
+        private var lastTxCount = 0
+''',
+r'''        private var lastBlockTime = 0L
+        private var lastHistoryRefreshTime = 0L
+        private var lastTxCount = 0
+''')
+rep(
+    wallet_service_fast,
+r'''            if (lastBlockTime < System.currentTimeMillis() - 2000) {
+                lastBlockTime = System.currentTimeMillis()
+''',
+r'''            if (lastBlockTime < System.currentTimeMillis() - 4000) {
+                lastBlockTime = System.currentTimeMillis()
+''')
+rep(
+    wallet_service_fast,
+r'''                    if (!wallet.isSynchronized) {
+                        updated = true
+                        // we want to see our transactions as they come in
+                        wallet.refreshHistory()
+                        val txCount = wallet.getHistory().getCount()
+                        if (txCount > lastTxCount) {
+                            // update the transaction list only if we have more than before
+                            lastTxCount = txCount
+                            fullRefresh = true
+                        }
+                    }
+                    observer?.onRefreshed(wallet, Status(), fullRefresh)
+''',
+r'''                    if (!wallet.isSynchronized) {
+                        // History refresh is comparatively expensive and previously ran every
+                        // sync callback. Refresh immediately for a wallet2 "updated" event and
+                        // otherwise only periodically while bulk scanning.
+                        val now = System.currentTimeMillis()
+                        if (updated || now - lastHistoryRefreshTime >= 15_000) {
+                            wallet.refreshHistory()
+                            lastHistoryRefreshTime = now
+                            updated = false
+                            val txCount = wallet.getHistory().getCount()
+                            if (txCount != lastTxCount) {
+                                lastTxCount = txCount
+                                fullRefresh = true
+                            }
+                        }
+                    }
+                    observer?.onRefreshed(wallet, Status(), fullRefresh)
+''')
+
+# ---------------------------------------------------------------------------
 # Native Monero wallet2 bridge: expose only the file operations needed by the
 # online watch-only wallet. Signing remains on Keystone.
 # ---------------------------------------------------------------------------
