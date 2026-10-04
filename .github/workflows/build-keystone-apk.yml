@@ -57,12 +57,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="keystone-test-v0.1"
+          TAG="keystone-test-v0.2"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --target "$GITHUB_SHA" \
-              --title "Monero One Hardware - Keystone test v0.1" \
-              --notes "Experimental debug build for physical Keystone / Feather-compatible Monero QR signing tests. The private spend key remains on Keystone. Use only a tiny test amount until the complete hardware round-trip is validated." \
+              --title "Monero One Hardware - Keystone test v0.2" \
+              --notes "Keystone test v0.2: improves watch-only restore-height handling and reduces sync/cache/UI churn for smoother initial synchronization. Experimental debug build for physical Keystone / Feather-compatible Monero QR signing tests. The private spend key remains on Keystone. Use only a tiny test amount until the complete hardware round-trip is validated." \
               --prerelease
           fi
           gh release upload "$TAG" \
