@@ -65,7 +65,7 @@ fun AnimatedKeystoneUr(
     type: String,
     data: ByteArray,
     modifier: Modifier = Modifier,
-    fps: Int = 8
+    fps: Int = 6
 ) {
     var frame by remember(type, data.contentHashCode()) { mutableStateOf("") }
     LaunchedEffect(type, data.contentHashCode(), fps) {
@@ -82,12 +82,18 @@ fun AnimatedKeystoneUr(
 
 @Composable
 private fun PlainQr(text: String, modifier: Modifier = Modifier) {
-    var bitmap by remember(text) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    // Do not key this state by the frame text. Keying remember(text) recreated a
+    // null bitmap for every animated UR part, so Compose briefly rendered the
+    // loading state between frames and the QR visibly flashed/flickered.
+    // Keep the previous frame visible until the next bitmap is fully rendered,
+    // then swap it atomically.
+    var bitmap by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
     LaunchedEffect(text) {
         if (text.isBlank()) {
-            bitmap = null
+            if (bitmap == null) return@LaunchedEffect
         } else {
-            bitmap = withContext(Dispatchers.Default) { makeQrBitmap(text, 720).asImageBitmap() }
+            val next = withContext(Dispatchers.Default) { makeQrBitmap(text, 640).asImageBitmap() }
+            bitmap = next
         }
     }
     Box(
