@@ -340,12 +340,43 @@ r'''    fun exportOutputs(filename: String, all: Boolean = true): Boolean =
             atRest(wallet) { wallet.exportOutputs(filename, all) }
         } ?: throw IllegalStateException("Wallet is NULL")
 
+    /**
+     * Runs a wallet operation with background refresh stopped but daemon RPCs still
+     * available. atRest() deliberately sets wallet2 offline while draining a refresh
+     * pass; these hardware-signing operations need the daemon, so bring it online
+     * only after the refresh thread is quiescent. atRest() resumes refresh afterward.
+     */
+    private inline fun <T> atRestOnline(wallet: Wallet, block: () -> T): T =
+        atRest(wallet) {
+            wallet.setOffline(false)
+            block()
+        }
+
     fun importKeyImages(filename: String): Boolean =
         withSession { wallet ->
-            wallet.importKeyImages(filename).also { imported ->
-                if (imported) {
+            atRestOnline(wallet) {
+                // Monero's WalletImpl::importKeyImages refuses to run unless the
+                // daemon is marked trusted because it asks the daemon for spent/
+                // unspent status. Trust only this operation, then restore the
+                // caller's previous setting.
+                val wasTrusted = wallet.trustedDaemon()
+                try {
+                    wallet.setTrustedDaemon(true)
+                    val imported = wallet.importKeyImages(filename)
+                    if (!imported) {
+                        val reason = wallet.status.errorString
+                            .takeIf { !it.isNullOrBlank() }
+                            ?: "wallet2 rejected the key-image file"
+                        Timber.e("Keystone key-image import failed: %s", reason)
+                        throw IllegalStateException("Key image sync failed: " + reason)
+                    }
+                    Timber.i("Keystone key-image import succeeded")
                     wallet.refreshHistory()
                     listener?.updated = true
+                    storeCache(wallet)
+                    true
+                } finally {
+                    wallet.setTrustedDaemon(wasTrusted)
                 }
             }
         } ?: throw IllegalStateException("Wallet is NULL")
@@ -354,35 +385,41 @@ r'''    fun exportOutputs(filename: String, all: Boolean = true): Boolean =
      * A watch-only wallet creates the transaction set but saves it instead of
      * broadcasting. wallet2 writes the unsigned transaction when commit gets a filename.
      */
-    fun createUnsignedTransaction(txData: TxData, filename: String): Boolean {
-        if (wallet == null) throw IllegalStateException("Create unsigned transaction failed: Wallet is NULL")
-        return sessionLock.withLock {
-            val current = wallet ?: throw IllegalStateException("Create unsigned transaction failed: Wallet is NULL")
-            check(refreshingWallet === current) { "Wallet is not connected" }
-            current.disposePendingTransaction()
-            txData.createPocketChange(current)
-            val pending = current.createTransaction(txData)
-            if (pending.status !== PendingTransaction.Status.Status_Ok) {
-                val error = pending.getErrorString()
-                current.disposePendingTransaction()
-                throw IllegalStateException("Create unsigned transaction failed: " + error)
+    fun createUnsignedTransaction(txData: TxData, filename: String): Boolean =
+        withSession { wallet ->
+            atRestOnline(wallet) {
+                wallet.disposePendingTransaction()
+                txData.createPocketChange(wallet)
+                val pending = wallet.createTransaction(txData)
+                if (pending.status !== PendingTransaction.Status.Status_Ok) {
+                    val error = pending.getErrorString()
+                    wallet.disposePendingTransaction()
+                    throw IllegalStateException("Create unsigned transaction failed: " + error)
+                }
+                val saved = pending.commit(filename, true)
+                val error = if (saved) null else pending.getErrorString()
+                wallet.disposePendingTransaction()
+                if (!saved) throw IllegalStateException("Saving unsigned transaction failed: " + error)
+                Timber.i("Keystone unsigned transaction saved")
+                true
             }
-            val saved = pending.commit(filename, true)
-            val error = if (saved) null else pending.getErrorString()
-            current.disposePendingTransaction()
-            if (!saved) throw IllegalStateException("Saving unsigned transaction failed: " + error)
-            true
-        }
-    }
+        } ?: throw IllegalStateException("Create unsigned transaction failed: Wallet is NULL")
 
     fun submitSignedTransaction(filename: String): Boolean =
         withSession { wallet ->
-            check(refreshingWallet === wallet) { "Wallet is not connected" }
-            wallet.submitTransaction(filename).also { submitted ->
-                if (submitted) {
-                    listener?.updated = true
-                    wallet.refreshHistory()
+            atRestOnline(wallet) {
+                val submitted = wallet.submitTransaction(filename)
+                if (!submitted) {
+                    val reason = wallet.status.errorString
+                        .takeIf { !it.isNullOrBlank() }
+                        ?: "wallet2 rejected the signed transaction"
+                    Timber.e("Keystone signed transaction submit failed: %s", reason)
+                    throw IllegalStateException("Signed transaction submit failed: " + reason)
                 }
+                Timber.i("Keystone signed transaction submitted")
+                listener?.updated = true
+                wallet.refreshHistory()
+                true
             }
         } ?: throw IllegalStateException("Wallet is NULL")
 
@@ -677,11 +714,13 @@ keystone_ops = r'''    private fun requireActiveKeystone(): Pair<WalletInfo, Mon
     suspend fun keystoneImportKeyImages(data: ByteArray) = withContext(Dispatchers.IO) {
         require(data.isNotEmpty()) { "Key-image QR was empty" }
         val (info, kit) = requireActiveKeystone()
+        Timber.i("Keystone key-image QR decoded: %d bytes", data.size)
         val file = File.createTempFile("keystone_keyimages_", ".bin", context.cacheDir)
         try {
             file.writeBytes(data)
             check(kit.importKeyImages(file.absolutePath)) { "Key image sync failed" }
             check(_activeWallet.value?.id == info.id) { "Active wallet changed — please retry" }
+            Timber.i("Keystone key-image sync complete")
         } finally {
             file.delete()
         }
@@ -713,6 +752,7 @@ keystone_ops = r'''    private fun requireActiveKeystone(): Pair<WalletInfo, Mon
         val file = File.createTempFile("keystone_signed_", ".bin", context.cacheDir)
         try {
             file.writeBytes(data)
+            Timber.i("Keystone signed-tx QR decoded: %d bytes", data.size)
             val submitted = kit.submitSignedTransaction(file.absolutePath)
             check(_activeWallet.value?.id == info.id) { "Active wallet changed — please retry" }
             submitted
