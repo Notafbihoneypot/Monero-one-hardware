@@ -48,6 +48,7 @@ private enum class KeystoneSignStage {
     PREPARE_UNSIGNED,
     SHOW_UNSIGNED,
     SCAN_SIGNED,
+    READY_TO_BROADCAST,
     BROADCASTING,
     SUCCESS
 }
@@ -66,6 +67,7 @@ fun KeystoneSignScreen(
     var stage by remember { mutableStateOf(KeystoneSignStage.PREPARE_OUTPUTS) }
     var outputs by remember { mutableStateOf<ByteArray?>(null) }
     var unsignedTx by remember { mutableStateOf<ByteArray?>(null) }
+    var signedTx by remember { mutableStateOf<ByteArray?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
     fun fail(t: Throwable) {
@@ -223,7 +225,7 @@ fun KeystoneSignScreen(
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Scan this unsigned transaction. Confirm the same address, amount, and fee on the Keystone screen.",
+                        "Scan this unsigned transaction with Keystone, verify the address, amount, and fee, then sign. Keystone will show a signed-transaction QR above its Done button.",
                         style = MaterialTheme.typography.bodyMedium,
                         textAlign = TextAlign.Center
                     )
@@ -239,14 +241,20 @@ fun KeystoneSignScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(Icons.Default.QrCodeScanner, contentDescription = null)
-                        Text("Scan Signed Transaction")
+                        Text("Scan Keystone Signed QR")
                     }
                 }
 
                 KeystoneSignStage.SCAN_SIGNED -> {
                     Text(
-                        "Scan the signed transaction shown by Keystone",
+                        "3. Scan the signed QR from Keystone",
                         style = MaterialTheme.typography.titleMedium,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Keystone's screen with the Done button contains the signed transaction QR. Keep that screen open and do not press Done until Monero One confirms the QR was received.",
+                        style = MaterialTheme.typography.bodyMedium,
                         textAlign = TextAlign.Center
                     )
                     Spacer(Modifier.height(12.dp))
@@ -259,23 +267,75 @@ fun KeystoneSignScreen(
                             expectedType = KeystoneUrTypes.TX_SIGNED,
                             onDecoded = { payload ->
                                 if (payload !is KeystoneScanPayload.Ur) return@KeystoneQrScanner
-                                stage = KeystoneSignStage.BROADCASTING
-                                scope.launch {
-                                    try {
-                                        check(walletViewModel.keystoneSubmitSignedTransaction(payload.bytes)) {
-                                            "Monero wallet rejected the signed transaction"
-                                        }
-                                        stage = KeystoneSignStage.SUCCESS
-                                    } catch (t: Throwable) {
-                                        fail(t)
-                                        stage = KeystoneSignStage.SHOW_UNSIGNED
-                                    }
-                                }
+                                signedTx = payload.bytes
+                                error = null
+                                stage = KeystoneSignStage.READY_TO_BROADCAST
                             },
                             onError = { error = it },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
+                }
+
+                KeystoneSignStage.READY_TO_BROADCAST -> {
+                    Spacer(Modifier.weight(1f))
+                    Icon(
+                        Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(64.dp)
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        "Signed transaction received",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "The signed QR is now on this phone. You can press Done on Keystone. Review the destination and amount above, then broadcast from Monero One.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    PrimaryButton(
+                        onClick = {
+                            val payload = signedTx
+                            if (payload == null) {
+                                error = "Signed transaction is missing. Scan it again."
+                            } else {
+                                error = null
+                                stage = KeystoneSignStage.BROADCASTING
+                                scope.launch {
+                                    try {
+                                        check(walletViewModel.keystoneSubmitSignedTransaction(payload)) {
+                                            "Monero wallet rejected the signed transaction"
+                                        }
+                                        stage = KeystoneSignStage.SUCCESS
+                                    } catch (t: Throwable) {
+                                        fail(t)
+                                        stage = KeystoneSignStage.READY_TO_BROADCAST
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Broadcast / Send XMR")
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            signedTx = null
+                            error = null
+                            stage = KeystoneSignStage.SCAN_SIGNED
+                        }
+                    ) {
+                        Text("Scan again")
+                    }
+                    Spacer(Modifier.weight(1f))
                 }
 
                 KeystoneSignStage.SUCCESS -> {
