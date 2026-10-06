@@ -62,7 +62,7 @@ jobs:
             gh release create "$TAG" \
               --target "$GITHUB_SHA" \
               --title "Monero One Hardware - Keystone test v0.7" \
-          Keystone test v0.7: aligns the final Monero offline-signing step with Feather/Keystone. After Keystone signs, Monero One now explicitly scans the signed xmr-txsigned QR from Keystone's Done screen, confirms receipt, and only broadcasts after the user presses Broadcast / Send XMR. It also adds clearer instructions not to press Done on Keystone until Monero One has captured the signed QR. Includes v0.6 key-image/trusted-daemon and CameraX fixes, v0.5 QR flicker fix, v0.4 restore-height override, and earlier pairing/sync fixes. Experimental debug build; use only a tiny test amount until the full round-trip is validated.
+              --notes "Keystone test v0.7: aligns the final Monero offline-signing step with Feather/Keystone. After Keystone signs, Monero One explicitly scans the signed xmr-txsigned QR from the Keystone Done screen, confirms receipt, and only broadcasts after the user presses Broadcast / Send XMR. It also adds clearer instructions not to press Done on Keystone until Monero One has captured the signed QR. Includes v0.6 key-image/trusted-daemon and CameraX fixes, v0.5 QR flicker fix, v0.4 restore-height override, and earlier pairing/sync fixes. Experimental debug build; use only a tiny test amount until the full round-trip is validated." \
               --prerelease
           fi
           gh release upload "$TAG" \
