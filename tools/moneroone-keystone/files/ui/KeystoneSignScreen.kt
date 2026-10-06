@@ -171,7 +171,7 @@ fun KeystoneSignScreen(
                     }
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Key-image import lets the watch-only wallet know which outputs were already spent. Use your own or a trusted Monero node when possible.",
+                        "Key-image import lets the watch-only wallet know which outputs were already spent. Monero wallet2 requires the selected node to be trusted for this import step, so prefer your own or a node you trust.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
