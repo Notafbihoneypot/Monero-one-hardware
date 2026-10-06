@@ -54,6 +54,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 sealed interface KeystoneScanPayload {
     data class Text(val value: String) : KeystoneScanPayload
@@ -169,9 +170,17 @@ private fun KeystoneCamera(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
+    val providerRef = remember { AtomicReference<ProcessCameraProvider?>(null) }
 
     DisposableEffect(Unit) {
-        onDispose { executor.shutdown() }
+        onDispose {
+            // Explicitly detach CameraX when a QR stage leaves composition.
+            // Without this the previous scanner could keep surfaces/use-cases alive
+            // while the next Keystone scan screen opened, causing reopen churn and
+            // abandoned BufferQueue/ImageReader surfaces.
+            providerRef.getAndSet(null)?.unbindAll()
+            executor.shutdown()
+        }
     }
 
     AndroidView(
@@ -187,6 +196,7 @@ private fun KeystoneCamera(
             val future = ProcessCameraProvider.getInstance(ctx)
             future.addListener({
                 val provider = future.get()
+                providerRef.set(provider)
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
