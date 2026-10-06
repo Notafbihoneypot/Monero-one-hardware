@@ -57,12 +57,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="keystone-test-v0.6"
+          TAG="keystone-test-v0.7"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --target "$GITHUB_SHA" \
-              --title "Monero One Hardware - Keystone test v0.6" \
-              --notes "Keystone test v0.6: fixes key-image sync by quiescing background refresh, temporarily trusting the selected daemon only for wallet2 key-image import, restoring the prior trust state afterward, and surfacing wallet2 error text. It also quiesces unsigned-tx creation and signed-tx broadcast while keeping daemon RPC online, and explicitly releases CameraX between QR stages to improve final signed-QR scanning. Includes v0.5 QR flicker, v0.4 restore-height, v0.3 pairing, and v0.2 sync fixes. Experimental debug build; use only a tiny test amount until the full hardware round-trip is validated." \
+              --title "Monero One Hardware - Keystone test v0.7" \
+          Keystone test v0.7: aligns the final Monero offline-signing step with Feather/Keystone. After Keystone signs, Monero One now explicitly scans the signed xmr-txsigned QR from Keystone's Done screen, confirms receipt, and only broadcasts after the user presses Broadcast / Send XMR. It also adds clearer instructions not to press Done on Keystone until Monero One has captured the signed QR. Includes v0.6 key-image/trusted-daemon and CameraX fixes, v0.5 QR flicker fix, v0.4 restore-height override, and earlier pairing/sync fixes. Experimental debug build; use only a tiny test amount until the full round-trip is validated.
               --prerelease
           fi
           gh release upload "$TAG" \
