@@ -868,6 +868,7 @@ rep(
     "import one.monero.moneroone.ui.screens.wallet.AddWalletScreen\n"
     "import one.monero.moneroone.ui.screens.keystone.KeystonePairScreen\n"
     "import one.monero.moneroone.ui.screens.keystone.KeystoneSignScreen\n"
+    "import one.monero.moneroone.ui.screens.keystone.KeystoneKeyImageSyncScreen\n"
 )
 rep(
     nav,
@@ -880,6 +881,7 @@ r'''    data object AddWallet : Screen("add_wallet")
         fun createRoute(address: String, amount: Long, sweep: Boolean): String =
             "keystone_sign?address=" + android.net.Uri.encode(address) + "&amount=" + amount + "&sweep=" + sweep
     }
+    data object KeystoneKeyImages : Screen("keystone_key_images")
 ''')
 rep(
     nav,
@@ -966,6 +968,481 @@ sign_route = r'''
 '''
 insert_before(nav, "            composable(Screen.QRScanner.route) {\n", sign_route)
 
+
+# ---------------------------------------------------------------------------
+# Keystone balance / scan maintenance.
+# ---------------------------------------------------------------------------
+
+# wallet2's public API already supports rescanSpent(), but monero-kit never
+# exposed it through JNI. Add the minimal bridge.
+rep(
+    wallet_java,
+    "//virtual bool rescanSpent() = 0;\n",
+    "public native boolean rescanSpent();\n"
+)
+rep(
+    cpp,
+    "//virtual bool rescanSpent() = 0;\n",
+r'''JNIEXPORT jboolean JNICALL
+Java_io_horizontalsystems_monerokit_model_Wallet_rescanSpent(
+        JNIEnv *env, jobject instance) {
+    Monero::Wallet *wallet = getHandle<Monero::Wallet>(env, instance);
+    bool success = false;
+    try {
+        success = wallet->rescanSpent();
+    } catch (const std::exception &e) {
+        throwIllegalState(env, std::string("Rescan spent failed: ") + e.what());
+    } catch (...) {
+        throwIllegalState(env, "Rescan spent failed");
+    }
+    return static_cast<jboolean>(success);
+}
+
+''')
+
+# Add a reusable trusted-daemon spent rescan and run it best-effort after a
+# signed Keystone transaction is successfully broadcast. A rescan failure must
+# never turn an already-broadcast transaction into a reported send failure.
+_service_data = read(service)
+_service_anchor = r'''    /**
+     * A watch-only wallet creates the transaction set but saves it instead of
+'''
+_service_rescan = r'''    fun rescanSpent(): Boolean =
+        withSession { wallet ->
+            atRestOnline(wallet) {
+                val wasTrusted = wallet.trustedDaemon()
+                try {
+                    wallet.setTrustedDaemon(true)
+                    val rescanned = wallet.rescanSpent()
+                    if (!rescanned) {
+                        val reason = wallet.status.errorString
+                            .takeIf { !it.isNullOrBlank() }
+                            ?: "wallet2 could not rescan spent outputs"
+                        Timber.e("Rescan spent failed: %s", reason)
+                        throw IllegalStateException("Rescan spent failed: " + reason)
+                    }
+                    Timber.i("Rescan spent succeeded")
+                    listener?.updated = true
+                    wallet.refreshHistory()
+                    storeCache(wallet)
+                    true
+                } finally {
+                    wallet.setTrustedDaemon(wasTrusted)
+                }
+            }
+        } ?: throw IllegalStateException("Wallet is NULL")
+
+'''
+if _service_anchor not in _service_data:
+    raise SystemExit("WalletService rescan insert anchor missing")
+_service_data = _service_data.replace(_service_anchor, _service_rescan + _service_anchor, 1)
+
+_submit_old = r'''                Timber.i("Keystone signed transaction submitted")
+                listener?.updated = true
+                wallet.refreshHistory()
+                true
+'''
+_submit_new = r'''                Timber.i("Keystone signed transaction submitted")
+
+                val wasTrusted = wallet.trustedDaemon()
+                try {
+                    wallet.setTrustedDaemon(true)
+                    if (!wallet.rescanSpent()) {
+                        Timber.w("Post-send rescan spent failed: %s", wallet.status.errorString)
+                    } else {
+                        Timber.i("Post-send rescan spent succeeded")
+                    }
+                } catch (t: Throwable) {
+                    Timber.w(t, "Post-send rescan spent failed after broadcast")
+                } finally {
+                    wallet.setTrustedDaemon(wasTrusted)
+                }
+
+                listener?.updated = true
+                wallet.refreshHistory()
+                storeCache(wallet)
+                true
+'''
+if _submit_old not in _service_data:
+    raise SystemExit("WalletService signed-submit balance anchor missing")
+_service_data = _service_data.replace(_submit_old, _submit_new, 1)
+write(service, _service_data)
+
+_kit_data = read(kit)
+_kit_anchor = r'''    fun importKeyImages(filename: String): Boolean =
+        walletService.importKeyImages(filename)
+
+'''
+_kit_new = r'''    fun importKeyImages(filename: String): Boolean =
+        walletService.importKeyImages(filename)
+
+    fun rescanSpent(): Boolean =
+        walletService.rescanSpent()
+
+'''
+if _kit_anchor not in _kit_data:
+    raise SystemExit("MoneroKit rescan anchor missing")
+write(kit, _kit_data.replace(_kit_anchor, _kit_new, 1))
+
+# The normal reset-sync path requires a seed. Keystone intentionally has no
+# spend seed on the phone, so rebuild it from the encrypted watch-only address
+# and private view key, keeping old cache files for recovery.
+_vm_data = read(vm)
+_reset_old = r'''            val active = _activeWallet.value ?: return
+            val seedData = secrets.loadSeed(active.id) ?: run {
+                Timber.w("No stored seed, cannot reset sync")
+                _walletState.update { it.copy(error = "No wallet seed to reset sync") }
+                return
+            }
+
+            // Never replace a wallet whose stored seed has not been verified against its file.
+            check(verifySeedForExport(active.id)) {
+                "Cannot reset sync until the seed matches the wallet file. Original files preserved."
+            }
+            cancelKitObservers()
+            WalletManager.stopAndRelease()
+            retainFilesForRebuild(active, seedData.first)
+'''
+_reset_new = r'''            val active = _activeWallet.value ?: return
+
+            if (active.isKeystone) {
+                val watchOnly = secrets.loadWatchOnly(active.id) ?: run {
+                    Timber.w("No stored Keystone watch-only keys, cannot reset sync")
+                    _walletState.update { it.copy(error = "Missing Keystone watch-only keys") }
+                    return
+                }
+
+                cancelKitObservers()
+                WalletManager.stopAndRelease()
+
+                val nextReset = active.syncResetCount + 1
+                val nextCacheId = WalletCacheIds.watchOnlyWalletId(watchOnly.first, nextReset)
+                checkNotNull(mergeWalletUpdate(active.id) {
+                    it.copy(
+                        syncResetCount = nextReset,
+                        derivedWalletId = nextCacheId,
+                        retainedCacheIds = (it.retainedCacheIds + listOfNotNull(it.derivedWalletId)).distinct(),
+                        cachedBalance = 0L,
+                        cachedUnlockedBalance = 0L
+                    )
+                }) { "Wallet was removed during recovery" }
+            } else {
+                val seedData = secrets.loadSeed(active.id) ?: run {
+                    Timber.w("No stored seed, cannot reset sync")
+                    _walletState.update { it.copy(error = "No wallet seed to reset sync") }
+                    return
+                }
+
+                // Never replace a wallet whose stored seed has not been verified against its file.
+                check(verifySeedForExport(active.id)) {
+                    "Cannot reset sync until the seed matches the wallet file. Original files preserved."
+                }
+                cancelKitObservers()
+                WalletManager.stopAndRelease()
+                retainFilesForRebuild(active, seedData.first)
+            }
+'''
+if _reset_old not in _vm_data:
+    raise SystemExit("Keystone reset-sync anchor missing")
+_vm_data = _vm_data.replace(_reset_old, _reset_new, 1)
+
+_vm_ki_anchor = r'''    suspend fun keystoneImportKeyImages(data: ByteArray) = withContext(Dispatchers.IO) {
+'''
+_vm_ki_method = r'''    suspend fun keystoneRescanSpent(): Boolean = withContext(Dispatchers.IO) {
+        val (_, kit) = requireActiveKeystone()
+        check(kit.rescanSpent()) { "Rescan spent failed" }
+        true
+    }
+
+'''
+if _vm_ki_anchor not in _vm_data:
+    raise SystemExit("Keystone rescan ViewModel anchor missing")
+_vm_data = _vm_data.replace(_vm_ki_anchor, _vm_ki_method + _vm_ki_anchor, 1)
+write(vm, _vm_data)
+
+# Sync Settings: allow a literal block height, Feather-style spent rescan, and
+# direct navigation into standalone Keystone key-image sync.
+sync_settings = "app/src/main/java/one/monero/moneroone/ui/screens/settings/SyncSettingsScreen.kt"
+_sync = read(sync_settings)
+_sync = _sync.replace(
+    "import androidx.compose.material3.LinearProgressIndicator\n",
+    "import androidx.compose.material3.LinearProgressIndicator\nimport androidx.compose.material3.OutlinedTextField\n"
+)
+_sync = _sync.replace(
+    "import androidx.compose.runtime.remember\n",
+    "import androidx.compose.runtime.remember\nimport androidx.compose.runtime.rememberCoroutineScope\n"
+)
+_sync = _sync.replace(
+    "import java.util.Locale\n",
+    "import java.util.Locale\nimport kotlinx.coroutines.launch\n"
+)
+_sync = _sync.replace(
+r'''fun SyncSettingsScreen(
+    walletViewModel: WalletViewModel,
+    onBack: () -> Unit,
+    onNodeSettingsClick: () -> Unit
+) {
+''',
+r'''fun SyncSettingsScreen(
+    walletViewModel: WalletViewModel,
+    onBack: () -> Unit,
+    onNodeSettingsClick: () -> Unit,
+    onKeystoneKeyImageSync: () -> Unit = {}
+) {
+''',
+    1
+)
+_sync = _sync.replace(
+r'''    var showDatePicker by remember { mutableStateOf(false) }
+    // Restore height/date are per-wallet, from the active WalletInfo.
+''',
+r'''    val scope = rememberCoroutineScope()
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showHeightDialog by remember { mutableStateOf(false) }
+    var heightText by remember { mutableStateOf("") }
+    var showRescanSpentConfirm by remember { mutableStateOf(false) }
+    var spentRescanRunning by remember { mutableStateOf(false) }
+    var maintenanceMessage by remember { mutableStateOf<String?>(null) }
+    // Restore height/date are per-wallet, from the active WalletInfo.
+''',
+    1
+)
+
+_scan_card_end = r'''        // Background Sync section: last, where iOS has its background
+'''
+_scan_maintenance = r'''        TextButton(
+            onClick = {
+                heightText = restoreHeight.toString()
+                showHeightDialog = true
+            },
+            modifier = Modifier.align(Alignment.End)
+        ) {
+            Text(tr("Enter block height"), color = MoneroOrange)
+        }
+
+        if (activeWallet?.isKeystone == true) {
+            SettingsSectionHeader(tr("Hardware Wallet Maintenance"))
+
+            GlassCard(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onKeystoneKeyImageSync,
+                cornerRadius = 16.dp,
+                shadow = false
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Sync,
+                        contentDescription = null,
+                        tint = MoneroOrange,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = tr("Sync Key Images with Keystone"),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = tr("Update spent/unspent status from the hardware wallet without sending."),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MoneroTheme.colors.labelTertiary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            GlassCard(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
+                    if (!spentRescanRunning) showRescanSpentConfirm = true
+                },
+                cornerRadius = 16.dp,
+                shadow = false
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (spentRescanRunning) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Sync,
+                            contentDescription = null,
+                            tint = MoneroOrange,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = tr("Rescan Spent Outputs"),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = tr("Recheck known key images against the selected node."),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            maintenanceMessage?.let { message ->
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+'''
+if _scan_card_end not in _sync:
+    raise SystemExit("Sync Settings maintenance insert anchor missing")
+_sync = _sync.replace(_scan_card_end, _scan_maintenance + _scan_card_end, 1)
+
+# Warn Keystone users that a full cache rebuild cannot derive key images from
+# the view key alone.
+_sync = _sync.replace(
+r'''                text = { Text(tr("Scanning restarts at block %s. Earlier transactions won't be found.", formatHeight(newHeight))) },
+''',
+r'''                text = {
+                    Text(
+                        if (activeWallet?.isKeystone == true) {
+                            tr("Scanning restarts at block %s. Earlier transactions won't be found. After the rescan finishes, sync key images with Keystone so spent outputs are accurate.", formatHeight(newHeight))
+                        } else {
+                            tr("Scanning restarts at block %s. Earlier transactions won't be found.", formatHeight(newHeight))
+                        }
+                    )
+                },
+''',
+    1
+)
+
+_sync_dialog_anchor = "\n}\n\nprivate fun getSyncStatusText(syncState: SyncState): String {\n"
+_sync_dialogs = r'''
+    if (showHeightDialog) {
+        AlertDialog(
+            onDismissRequest = { showHeightDialog = false },
+            title = { Text(tr("Set Restore Height")) },
+            text = {
+                Column {
+                    Text(tr("Enter the block height to start scanning from. Use an earlier height than the wallet's first transaction."))
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = heightText,
+                        onValueChange = { value -> heightText = value.filter { it.isDigit() }.take(10) },
+                        label = { Text(tr("Block height")) },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val newHeight = heightText.toLongOrNull()
+                        if (newHeight != null && newHeight >= 0L) {
+                            showHeightDialog = false
+                            walletViewModel.setRestoreHeight(newHeight, 0L)
+                            walletViewModel.resetSync()
+                            maintenanceMessage = if (activeWallet?.isKeystone == true) {
+                                tr("Blockchain rescan started. Sync key images with Keystone again after it finishes.")
+                            } else {
+                                tr("Blockchain rescan started.")
+                            }
+                        }
+                    },
+                    enabled = heightText.toLongOrNull() != null
+                ) {
+                    Text(tr("Rescan"), color = MoneroOrange)
+                }
+            },
+            dismissButton = {
+                DismissTextButton(onClick = { showHeightDialog = false }) {
+                    Text(tr("Cancel"))
+                }
+            }
+        )
+    }
+
+    if (showRescanSpentConfirm) {
+        AlertDialog(
+            onDismissRequest = { showRescanSpentConfirm = false },
+            title = { Text(tr("Rescan Spent Outputs?")) },
+            text = {
+                Text(
+                    tr("This asks the selected Monero node which of your known key images are spent. That reveals which queried outputs belong to this wallet, so use your own or a node you trust.")
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRescanSpentConfirm = false
+                    spentRescanRunning = true
+                    maintenanceMessage = null
+                    scope.launch {
+                        try {
+                            walletViewModel.keystoneRescanSpent()
+                            maintenanceMessage = tr("Spent outputs rescanned. Balance refreshed.")
+                        } catch (t: Throwable) {
+                            maintenanceMessage = t.message ?: tr("Rescan spent failed")
+                        } finally {
+                            spentRescanRunning = false
+                        }
+                    }
+                }) {
+                    Text(tr("Rescan"), color = MoneroOrange)
+                }
+            },
+            dismissButton = {
+                DismissTextButton(onClick = { showRescanSpentConfirm = false }) {
+                    Text(tr("Cancel"))
+                }
+            }
+        )
+    }
+'''
+if _sync_dialog_anchor not in _sync:
+    raise SystemExit("Sync Settings dialog insert anchor missing")
+_sync = _sync.replace(_sync_dialog_anchor, _sync_dialogs + _sync_dialog_anchor, 1)
+write(sync_settings, _sync)
+
+
+
+rep(
+    nav,
+r'''                    onBack = { navController.popBackStack() },
+                    onNodeSettingsClick = { navController.navigate(Screen.NodeSettings.route) }
+''',
+r'''                    onBack = { navController.popBackStack() },
+                    onNodeSettingsClick = { navController.navigate(Screen.NodeSettings.route) },
+                    onKeystoneKeyImageSync = { navController.navigate(Screen.KeystoneKeyImages.route) }
+''')
+keystone_key_images_route = r'''
+            composable(Screen.KeystoneKeyImages.route) {
+                KeystoneKeyImageSyncScreen(
+                    walletViewModel = walletViewModel,
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+'''
+insert_before(nav, "            composable(Screen.NodeSettings.route) {\n", keystone_key_images_route)
+
 # ---------------------------------------------------------------------------
 # Copy new source files into Monero One.
 # ---------------------------------------------------------------------------
@@ -973,7 +1450,7 @@ copy_asset(
     "core/KeystoneSupport.kt",
     "app/src/main/java/one/monero/moneroone/core/wallet/KeystoneSupport.kt"
 )
-for name in ["KeystoneQr.kt", "KeystonePairScreen.kt", "KeystoneSignScreen.kt"]:
+for name in ["KeystoneQr.kt", "KeystonePairScreen.kt", "KeystoneSignScreen.kt", "KeystoneKeyImageSyncScreen.kt"]:
     copy_asset(
         "ui/" + name,
         "app/src/main/java/one/monero/moneroone/ui/screens/keystone/" + name
