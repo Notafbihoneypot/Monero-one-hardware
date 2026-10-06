@@ -217,9 +217,11 @@ r'''            if (lastBlockTime < System.currentTimeMillis() - 2000) {
 r'''            if (lastBlockTime < System.currentTimeMillis() - 4000) {
                 lastBlockTime = System.currentTimeMillis()
 ''')
-rep(
-    wallet_service_fast,
-r'''                    if (!wallet.isSynchronized) {
+# Older monero-kit revisions refreshed history inside an explicit
+# if (!wallet.isSynchronized) block. Newer revisions moved that logic into a
+# different listener shape. Apply the old throttling patch only when that exact
+# layout is present; otherwise keep upstream's current listener semantics.
+_old_history_listener = r'''                    if (!wallet.isSynchronized) {
                         updated = true
                         // we want to see our transactions as they come in
                         wallet.refreshHistory()
@@ -231,8 +233,8 @@ r'''                    if (!wallet.isSynchronized) {
                         }
                     }
                     observer?.onRefreshed(wallet, Status(), fullRefresh)
-''',
-r'''                    if (!wallet.isSynchronized) {
+'''
+_new_history_listener = r'''                    if (!wallet.isSynchronized) {
                         // History refresh is comparatively expensive and previously ran every
                         // sync callback. Refresh immediately for a wallet2 "updated" event and
                         // otherwise only periodically while bulk scanning.
@@ -249,7 +251,12 @@ r'''                    if (!wallet.isSynchronized) {
                         }
                     }
                     observer?.onRefreshed(wallet, Status(), fullRefresh)
-''')
+'''
+_ws_data = read(wallet_service_fast)
+if _old_history_listener in _ws_data:
+    write(wallet_service_fast, _ws_data.replace(_old_history_listener, _new_history_listener, 1))
+else:
+    print("WalletService listener changed upstream; keeping current history-refresh logic")
 
 # ---------------------------------------------------------------------------
 # Native Monero wallet2 bridge: expose only the file operations needed by the
