@@ -57,12 +57,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="keystone-test-v0.7"
+          TAG="keystone-test-v0.8"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --target "$GITHUB_SHA" \
-              --title "Monero One Hardware - Keystone test v0.7" \
-              --notes "Keystone test v0.7: aligns the final Monero offline-signing step with Feather/Keystone. After Keystone signs, Monero One explicitly scans the signed xmr-txsigned QR from the Keystone Done screen, confirms receipt, and only broadcasts after the user presses Broadcast / Send XMR. It also adds clearer instructions not to press Done on Keystone until Monero One has captured the signed QR. Includes v0.6 key-image/trusted-daemon and CameraX fixes, v0.5 QR flicker fix, v0.4 restore-height override, and earlier pairing/sync fixes. Experimental debug build; use only a tiny test amount until the full round-trip is validated." \
+              --title "Monero One Hardware - Keystone test v0.8" \
+              --notes "Keystone test v0.8: adds Feather-style hardware-wallet maintenance for Keystone. Monero One now automatically runs a best-effort spent-output rescan after a successful signed broadcast, adds a manual Rescan Spent Outputs action with a trusted-node privacy warning, adds a standalone Sync Key Images with Keystone flow, allows entering an exact restore block height, and makes reset/rescan work for Keystone watch-only wallets without requiring a seed. Full restore-height rescans warn that a fresh Keystone key-image sync is needed afterward for accurate spent status. Includes all v0.7 signing-flow fixes." \
               --prerelease
           fi
           gh release upload "$TAG" \
