@@ -1166,7 +1166,7 @@ sync_settings = "app/src/main/java/one/monero/moneroone/ui/screens/settings/Sync
 _sync = read(sync_settings)
 _sync = _sync.replace(
     "import androidx.compose.material3.LinearProgressIndicator\n",
-    "import androidx.compose.material3.LinearProgressIndicator\nimport androidx.compose.material3.OutlinedTextField\n"
+    "import androidx.compose.material3.LinearProgressIndicator\nimport androidx.compose.material3.CircularProgressIndicator\nimport androidx.compose.material3.OutlinedTextField\n"
 )
 _sync = _sync.replace(
     "import androidx.compose.runtime.remember\n",
