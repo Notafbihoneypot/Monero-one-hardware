@@ -57,12 +57,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="keystone-test-v0.5"
+          TAG="keystone-test-v0.6"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --target "$GITHUB_SHA" \
-              --title "Monero One Hardware - Keystone test v0.5" \
-              --notes "Keystone test v0.5: fixes severe animated-QR flicker by retaining the previous rendered QR until the next UR frame is ready, instead of flashing a blank/loading state between frames. The phone-to-Keystone animation is also slowed slightly for steadier scanning. Includes the v0.4 restore-height override, v0.3 pairing verification, and v0.2 sync-performance fixes. Experimental debug build; use only a tiny test amount until the complete hardware round-trip is validated." \
+              --title "Monero One Hardware - Keystone test v0.6" \
+              --notes "Keystone test v0.6: fixes key-image sync by quiescing background refresh, temporarily trusting the selected daemon only for wallet2 key-image import, restoring the prior trust state afterward, and surfacing wallet2 error text. It also quiesces unsigned-tx creation and signed-tx broadcast while keeping daemon RPC online, and explicitly releases CameraX between QR stages to improve final signed-QR scanning. Includes v0.5 QR flicker, v0.4 restore-height, v0.3 pairing, and v0.2 sync fixes. Experimental debug build; use only a tiny test amount until the full hardware round-trip is validated." \
               --prerelease
           fi
           gh release upload "$TAG" \
