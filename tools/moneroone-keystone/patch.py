@@ -42,12 +42,12 @@ rep(
 )
 
 # ---------------------------------------------------------------------------
-# Fast-sync hardening.
+# Keystone/watch-only sync hardening.
 #
-# A freshly paired hardware/view-only wallet can scan millions of blocks. The
-# upstream kit currently serializes the wallet cache every 2,000 blocks and
-# rebuilds transaction history every ~2 seconds while catching up. On Android
-# that creates heavy disk I/O, allocation/GC churn and Compose jank.
+# Keep these changes scoped to watch-only wallets wherever possible. The first
+# implementation changed shared MoneroKit timing for every wallet, which gave
+# the hardware integration too much blast radius and caused regressions in the
+# normal Monero One experience.
 #
 # Also enforce the requested restore height for watch-only wallets. wallet2 can
 # reopen a partially-created view-only cache with restoreHeight=0 even though
@@ -105,10 +105,9 @@ r'''        val historyAll: List<TransactionInfo?>? = wallet.history.all
             }
         }
 ''',
-r'''        // Reading and mapping the entire history on every sync callback creates
-        // substantial allocation/GC pressure while scanning. Only refresh the public
-        // transaction list when the listener detected a history change or at final sync.
-        if (full || wallet.isSynchronized) {
+r'''        // Preserve upstream behavior for normal wallets. Only hardware/watch-only
+        // wallets skip repeated full-history mapping during bulk initial scanning.
+        if (seed !is Seed.WatchOnly || full || wallet.isSynchronized) {
             val historyAll: List<TransactionInfo?>? = wallet.history.all
             if (historyAll != null) {
                 _allTransactionsFlow.update {
@@ -128,16 +127,20 @@ r'''            // Periodically store wallet state during sync (every 2000 block
                 }
             }
 ''',
-r'''            // Persist enough progress to survive interruption without serializing a
-            // multi-megabyte wallet every couple of seconds on a fast initial scan.
+r'''            // Preserve upstream cache cadence for normal wallets. Watch-only hardware
+            // wallets can scan very quickly and have large caches, so avoid serializing
+            // them every couple of seconds during the initial catch-up.
             val now = System.currentTimeMillis()
-            if (walletHeight - lastStoreHeight >= 25_000 && now - lastStoreTimeMs >= 15_000) {
-                if (!savingState.getAndSet(true)) {
-                    walletService.storeWallet()
-                    savingState.set(false)
-                    lastStoreHeight = walletHeight
-                    lastStoreTimeMs = now
-                }
+            val shouldStore = if (seed is Seed.WatchOnly) {
+                walletHeight - lastStoreHeight >= 25_000 && now - lastStoreTimeMs >= 15_000
+            } else {
+                walletHeight - lastStoreHeight >= 2_000
+            }
+            if (shouldStore && !savingState.getAndSet(true)) {
+                walletService.storeWallet()
+                savingState.set(false)
+                lastStoreHeight = walletHeight
+                if (seed is Seed.WatchOnly) lastStoreTimeMs = now
             }
 ''')
 rep(
@@ -191,10 +194,10 @@ r'''        if (restoreHeight != null) {
             val height = wallet.blockChainHeight
             val from = restoreHeight.coerceAtLeast(0)
             val initFrom = wallet.restoreHeight
-            // A partially scanned view-only cache can reopen with restoreHeight=0.
-            // If it is still below the requested scan start, enforce the caller's
-            // restore height instead of continuing an unnecessary genesis scan.
-            if (initFrom != from && (height <= 1 || height < from)) {
+            // Preserve upstream behavior for normal wallets. Only a watch-only cache
+            // is allowed to correct a bad persisted restore height after scanning began.
+            val shouldCorrect = height <= 1 || (wallet.isWatchOnly && initFrom != from && height < from)
+            if (initFrom != from && shouldCorrect) {
                 Timber.w("wallet at height %d: scan from %d, not %d", height, from, initFrom)
                 wallet.setRestoreHeight(from)
             }
@@ -214,8 +217,10 @@ rep(
 r'''            if (lastBlockTime < System.currentTimeMillis() - 2000) {
                 lastBlockTime = System.currentTimeMillis()
 ''',
-r'''            if (lastBlockTime < System.currentTimeMillis() - 4000) {
-                lastBlockTime = System.currentTimeMillis()
+r'''            val now = System.currentTimeMillis()
+            val updateIntervalMs = if (wallet.isWatchOnly) 4000L else 2000L
+            if (lastBlockTime < now - updateIntervalMs) {
+                lastBlockTime = now
 ''')
 # Older monero-kit revisions refreshed history inside an explicit
 # if (!wallet.isSynchronized) block. Newer revisions moved that logic into a
@@ -710,7 +715,10 @@ keystone_ops = r'''    private fun requireActiveKeystone(): Pair<WalletInfo, Mon
         val (info, kit) = requireActiveKeystone()
         val file = File.createTempFile("keystone_outputs_", ".bin", context.cacheDir)
         try {
-            check(kit.exportOutputs(file.absolutePath, true)) { "Could not export wallet outputs" }
+            // Match Feather's default: export only outputs that still need key-image
+            // synchronization. Exporting every historical output on every send makes
+            // the UR payload grow forever and is very expensive on Android.
+            check(kit.exportOutputs(file.absolutePath, false)) { "Could not export wallet outputs" }
             check(_activeWallet.value?.id == info.id) { "Active wallet changed — please retry" }
             file.readBytes()
         } finally {
