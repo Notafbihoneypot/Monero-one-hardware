@@ -87,7 +87,8 @@ rep(
 r'''            checkedWalletFilePrimaryAddress = walletService.withWallet { it.getSubaddress(0, 0) }
 ''',
 r'''            checkedWalletFilePrimaryAddress = walletService.withWallet { it.getSubaddress(0, 0) }
-            checkedWalletFilePrivateViewKey = walletService.withWallet { it.secretViewKey }
+            checkedWalletFilePrivateViewKey =
+                if (seed is Seed.WatchOnly) walletService.withWallet { it.secretViewKey } else null
 '''
 )
 rep(
