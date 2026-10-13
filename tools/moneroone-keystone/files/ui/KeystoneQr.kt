@@ -66,37 +66,34 @@ fun AnimatedKeystoneUr(
     type: String,
     data: ByteArray,
     modifier: Modifier = Modifier,
-    fps: Int = 6
+    fps: Int = 5
 ) {
-    var frame by remember(type, data.contentHashCode()) { mutableStateOf("") }
-    LaunchedEffect(type, data.contentHashCode(), fps) {
+    // ByteArray.contentHashCode() is O(payload size). Computing it directly in
+    // Compose keys meant every animated-frame recomposition re-hashed the full
+    // Monero output/transaction payload. Cache it for this payload instance.
+    val dataHash = remember(data) { data.contentHashCode() }
+    var bitmap by remember(type, dataHash) {
+        mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+    }
+
+    // Generate the UR part and its bitmap in ONE sequential coroutine. The old
+    // two-stage frame -> LaunchedEffect(text) pipeline could queue/cancel QR
+    // renders faster than QRCodeWriter finished them, causing CPU spikes, GC and
+    // visible jank. A new frame is not requested until the previous bitmap is ready.
+    LaunchedEffect(type, dataHash, fps) {
         val ur = UR.fromBytes(type, data)
         val encoder = UREncoder(ur, 60, 10, 0)
-        val frameDelay = (1000L / fps.coerceIn(2, 15))
+        val frameDelay = 1000L / fps.coerceIn(2, 10)
         while (true) {
-            frame = encoder.nextPart().toString()
+            val text = encoder.nextPart().toString()
+            val next = withContext(Dispatchers.Default) {
+                makeQrBitmap(text, 512).asImageBitmap()
+            }
+            bitmap = next
             delay(frameDelay)
         }
     }
-    PlainQr(frame, modifier)
-}
 
-@Composable
-private fun PlainQr(text: String, modifier: Modifier = Modifier) {
-    // Do not key this state by the frame text. Keying remember(text) recreated a
-    // null bitmap for every animated UR part, so Compose briefly rendered the
-    // loading state between frames and the QR visibly flashed/flickered.
-    // Keep the previous frame visible until the next bitmap is fully rendered,
-    // then swap it atomically.
-    var bitmap by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
-    LaunchedEffect(text) {
-        if (text.isBlank()) {
-            if (bitmap == null) return@LaunchedEffect
-        } else {
-            val next = withContext(Dispatchers.Default) { makeQrBitmap(text, 640).asImageBitmap() }
-            bitmap = next
-        }
-    }
     Box(
         modifier = modifier.background(androidx.compose.ui.graphics.Color.White),
         contentAlignment = Alignment.Center
@@ -130,8 +127,9 @@ private fun makeQrBitmap(text: String, size: Int): Bitmap {
 
 private class KeystoneQrAnalyzer(
     private val onText: (String) -> Unit
-) : ImageAnalysis.Analyzer {
+) : ImageAnalysis.Analyzer, AutoCloseable {
     private val processing = AtomicBoolean(false)
+    private val closed = AtomicBoolean(false)
     private val scanner = BarcodeScanning.getClient(
         com.google.mlkit.vision.barcode.BarcodeScannerOptions.Builder()
             .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
@@ -140,7 +138,7 @@ private class KeystoneQrAnalyzer(
 
     @OptIn(ExperimentalGetImage::class)
     override fun analyze(imageProxy: ImageProxy) {
-        if (!processing.compareAndSet(false, true)) {
+        if (closed.get() || !processing.compareAndSet(false, true)) {
             imageProxy.close()
             return
         }
@@ -153,12 +151,18 @@ private class KeystoneQrAnalyzer(
         val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
         scanner.process(image)
             .addOnSuccessListener { barcodes ->
-                barcodes.firstOrNull()?.rawValue?.let(onText)
+                if (!closed.get()) barcodes.firstOrNull()?.rawValue?.let(onText)
             }
             .addOnCompleteListener {
                 processing.set(false)
                 imageProxy.close()
             }
+    }
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) {
+            scanner.close()
+        }
     }
 }
 
@@ -171,15 +175,17 @@ private fun KeystoneCamera(
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
     val providerRef = remember { AtomicReference<ProcessCameraProvider?>(null) }
+    val analyzerRef = remember { AtomicReference<KeystoneQrAnalyzer?>(null) }
+    val onTextRef = remember { AtomicReference(onText) }
+    val disposed = remember { AtomicBoolean(false) }
+    onTextRef.set(onText)
 
     DisposableEffect(Unit) {
         onDispose {
-            // Explicitly detach CameraX when a QR stage leaves composition.
-            // Without this the previous scanner could keep surfaces/use-cases alive
-            // while the next Keystone scan screen opened, causing reopen churn and
-            // abandoned BufferQueue/ImageReader surfaces.
+            disposed.set(true)
+            analyzerRef.getAndSet(null)?.close()
             providerRef.getAndSet(null)?.unbindAll()
-            executor.shutdown()
+            executor.shutdownNow()
         }
     }
 
@@ -196,14 +202,20 @@ private fun KeystoneCamera(
             val future = ProcessCameraProvider.getInstance(ctx)
             future.addListener({
                 val provider = future.get()
+                if (disposed.get()) {
+                    provider.unbindAll()
+                    return@addListener
+                }
                 providerRef.set(provider)
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
+                val analyzer = KeystoneQrAnalyzer { raw -> onTextRef.get().invoke(raw) }
+                analyzerRef.set(analyzer)
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
-                    .also { it.setAnalyzer(executor, KeystoneQrAnalyzer(onText)) }
+                    .also { it.setAnalyzer(executor, analyzer) }
                 provider.unbindAll()
                 provider.bindToLifecycle(
                     lifecycleOwner,
@@ -232,10 +244,10 @@ fun KeystoneQrScanner(
                 PackageManager.PERMISSION_GRANTED
         )
     }
-    var decoder by remember { mutableStateOf(URDecoder()) }
+    val decoderRef = remember { AtomicReference(URDecoder()) }
+    val lastFrameRef = remember { AtomicReference<String?>(null) }
     var progress by remember { mutableStateOf(0f) }
     var complete by remember { mutableStateOf(false) }
-    var lastFrame by remember { mutableStateOf<String?>(null) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
@@ -259,20 +271,24 @@ fun KeystoneQrScanner(
         KeystoneCamera(
             modifier = Modifier.fillMaxSize(),
             onText = scan@{ raw ->
-                if (complete || raw == lastFrame) return@scan
-                lastFrame = raw
+                if (complete || raw == lastFrameRef.get()) return@scan
+                lastFrameRef.set(raw)
                 try {
                     if (raw.startsWith("ur:", ignoreCase = true)) {
+                        val decoder = decoderRef.get()
                         decoder.receivePart(raw)
-                        progress = decoder.estimatedPercentComplete.toFloat().coerceIn(0f, 1f)
+                        val nextProgress = decoder.estimatedPercentComplete.toFloat().coerceIn(0f, 1f)
+                        if (kotlin.math.abs(nextProgress - progress) >= 0.01f || nextProgress >= 1f) {
+                            progress = nextProgress
+                        }
                         val result = decoder.result
                         if (result != null && result.type == ResultType.SUCCESS) {
                             val ur = result.ur
                             if (expectedType != null && !ur.type.equals(expectedType, ignoreCase = true)) {
                                 onError("Expected " + expectedType + " but scanned " + ur.type)
-                                decoder = URDecoder()
+                                decoderRef.set(URDecoder())
                                 progress = 0f
-                                lastFrame = null
+                                lastFrameRef.set(null)
                                 return@scan
                             }
                             complete = true
@@ -284,9 +300,9 @@ fun KeystoneQrScanner(
                     }
                 } catch (e: Exception) {
                     onError(e.message ?: "Could not decode QR")
-                    decoder = URDecoder()
+                    decoderRef.set(URDecoder())
                     progress = 0f
-                    lastFrame = null
+                    lastFrameRef.set(null)
                 }
             }
         )
