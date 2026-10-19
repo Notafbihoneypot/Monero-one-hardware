@@ -839,35 +839,130 @@ r'''            Spacer(modifier = Modifier.height(12.dp))
 send_screen = "app/src/main/java/one/monero/moneroone/ui/screens/send/SendScreen.kt"
 rep(
     send_screen,
-    "    onScanQr: () -> Unit,\n    onSent: () -> Unit\n) {\n",
-    "    onScanQr: () -> Unit,\n    onSent: () -> Unit,\n    onKeystoneSign: (String, Long, Boolean) -> Unit = { _, _, _ -> }\n) {\n"
+    "    onScanQr: () -> Unit,\n    onSent: () -> Unit,\n    // Payment links: the Link capsule, and claim links pasted into the recipient field.\n",
+    "    onScanQr: () -> Unit,\n    onSent: () -> Unit,\n    onKeystoneSign: (String, Long, Boolean) -> Unit = { _, _, _ -> },\n    // Payment links: the Link capsule, and claim links pasted into the recipient field.\n"
 )
 rep(
     send_screen,
-r'''            onAuthenticated = {
-                showAuthGate = false
-                walletViewModel.send(
-                    flow,
-                    address,
-                    walletViewModel.parseXmr(amount),
-                    isSweepAll = isSweepAll
-                )
-            },
+r'''    val sharedSendState by walletViewModel.sendState.collectAsState()
+    val sendState = sharedSendState.takeIf { it.flow == flow } ?: SendState.Idle
 ''',
-r'''            onAuthenticated = {
-                showAuthGate = false
-                val atomic = walletViewModel.parseXmr(amount)
-                if (walletViewModel.activeWallet.value?.isKeystone == true) {
-                    onKeystoneSign(address, atomic, isSweepAll)
-                } else {
-                    walletViewModel.send(
-                        flow,
-                        address,
-                        atomic,
-                        isSweepAll = isSweepAll
-                    )
+r'''    val sharedSendState by walletViewModel.sendState.collectAsState()
+    val sendState = sharedSendState.takeIf { it.flow == flow } ?: SendState.Idle
+    val isKeystone = walletViewModel.activeWallet.value?.isKeystone == true
+''')
+rep(
+    send_screen,
+r'''                        buildFee = { amt, sweep, unlocked ->
+                            ReviewFee.build(
+                                address, amt, sweep, unlocked,
+                                estimate = { a, s -> walletViewModel.estimateFee(address, a, isSweepAll = s) },
+                                prepare = { a, s -> walletViewModel.prepareSend(address, a, isSweepAll = s) }
+                            )
+                        },
+''',
+r'''                        buildFee = { amt, sweep, unlocked ->
+                            if (isKeystone) {
+                                val fee = walletViewModel.estimateFee(address, amt, isSweepAll = sweep)
+                                when {
+                                    fee <= 0L -> ReviewFeeResult.Failed("Fee estimation failed")
+                                    !sweep && amt + fee > unlocked -> ReviewFeeResult.OverBalance(fee)
+                                    else -> ReviewFeeResult.Estimated(fee)
+                                }
+                            } else {
+                                ReviewFee.build(
+                                    address, amt, sweep, unlocked,
+                                    estimate = { a, s -> walletViewModel.estimateFee(address, a, isSweepAll = s) },
+                                    prepare = { a, s -> walletViewModel.prepareSend(address, a, isSweepAll = s) }
+                                )
+                            }
+                        },
+                        hardwareWallet = isKeystone,
+''')
+rep(
+    send_screen,
+r'''                } else {
+                    val prepared = reviewFee.prepared
+                    scope.launch {
+                        // The transfer the review built is gone (the wallet closed meanwhile): the review builds it
+                        // again and shows its fee. Nothing is sent.
+                        if (prepared == null || !withContext(Dispatchers.IO) { walletViewModel.isPrepared(prepared) }) {
+                            sendInProgress = false
+                            reviewBuild++
+                            return@launch
+                        }
+                        // The transfer the review built goes out as it is: its fee is the one the review showed.
+                        walletViewModel.send(
+                            flow,
+                            SendRequest.of(address, walletViewModel.parseXmr(amount), memo, isSweepAll),
+                            prepared = prepared
+                        )
+                    }
                 }
-            },
+''',
+r'''                } else if (isKeystone) {
+                    sendInProgress = false
+                    onKeystoneSign(address, walletViewModel.parseXmr(amount), isSweepAll)
+                } else {
+                    val prepared = reviewFee.prepared
+                    scope.launch {
+                        // The transfer the review built is gone (the wallet closed meanwhile): the review builds it
+                        // again and shows its fee. Nothing is sent.
+                        if (prepared == null || !withContext(Dispatchers.IO) { walletViewModel.isPrepared(prepared) }) {
+                            sendInProgress = false
+                            reviewBuild++
+                            return@launch
+                        }
+                        // The transfer the review built goes out as it is: its fee is the one the review showed.
+                        walletViewModel.send(
+                            flow,
+                            SendRequest.of(address, walletViewModel.parseXmr(amount), memo, isSweepAll),
+                            prepared = prepared
+                        )
+                    }
+                }
+''')
+rep(
+    send_screen,
+r'''    buildFee: (Long, Boolean, Long) -> ReviewFeeResult,
+    xmrPrice: Double?,
+''',
+r'''    buildFee: (Long, Boolean, Long) -> ReviewFeeResult,
+    hardwareWallet: Boolean = false,
+    xmrPrice: Double?,
+''')
+rep(
+    send_screen,
+r'''            is ReviewFeeResult.Ready -> onReviewFee(ReviewFeeState(fee = result.prepared.fee, prepared = result.prepared))
+            // Auto-upgrade to sweep-all if amount + fee > balance (this effect then builds the sweep). An amount
+''',
+r'''            is ReviewFeeResult.Ready -> onReviewFee(ReviewFeeState(fee = result.prepared.fee, prepared = result.prepared))
+            is ReviewFeeResult.Estimated -> onReviewFee(ReviewFeeState(fee = result.fee))
+            // Auto-upgrade to sweep-all if amount + fee > balance (this effect then builds the sweep). An amount
+''')
+rep(
+    send_screen,
+r'''            enabled = feeReady && reviewFee.prepared != null && !sendInProgress && !needsSweepAllChoice
+''',
+r'''            enabled = feeReady && (hardwareWallet || reviewFee.prepared != null) && !sendInProgress && !needsSweepAllChoice
+''')
+
+prepared_send = "app/src/main/java/one/monero/moneroone/core/wallet/PreparedSend.kt"
+rep(
+    prepared_send,
+r'''sealed interface ReviewFeeResult {
+    /** The transfer is built and signed: its fee is the real one. Send broadcasts [prepared]. */
+    data class Ready(val prepared: PreparedSend) : ReviewFeeResult
+''',
+r'''sealed interface ReviewFeeResult {
+    /** The transfer is built and signed: its fee is the real one. Send broadcasts [prepared]. */
+    data class Ready(val prepared: PreparedSend) : ReviewFeeResult
+
+    /**
+     * Hardware/watch-only review: wallet2 can estimate the fee but cannot sign on the phone.
+     * Keystone shows the final fee before the user approves the offline signature.
+     */
+    data class Estimated(val fee: Long) : ReviewFeeResult
 ''')
 
 nav = "app/src/main/java/one/monero/moneroone/ui/navigation/NavGraph.kt"
