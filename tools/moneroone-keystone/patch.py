@@ -38,7 +38,9 @@ def copy_asset(src, dst):
 rep(
     "app/build.gradle.kts",
     "    implementation(libs.qrcode.kotlin)\n",
-    "    implementation(libs.qrcode.kotlin)\n    implementation(\"com.sparrowwallet:hummingbird:1.7.4\")\n"
+    "    implementation(libs.qrcode.kotlin)\n"
+    "    implementation(\"com.sparrowwallet:hummingbird:1.7.4\")\n"
+    "    implementation(\"com.google.mlkit:barcode-scanning:17.3.0\")\n"
 )
 
 # ---------------------------------------------------------------------------
