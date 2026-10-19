@@ -347,7 +347,7 @@ Java_io_horizontalsystems_monerokit_model_Wallet_importKeyImages(
 service = "monero-kit-android/monerokit/src/main/java/io/horizontalsystems/monerokit/WalletService.kt"
 insert_before(
     service,
-    "    /** Creates and commits one transaction, both on the same wallet. */\n",
+    "    /**\n     * Creates and commits one transaction, both on the same wallet. [beforeCommit] gets the signed\n",
 r'''    fun exportOutputs(filename: String, all: Boolean = true): Boolean =
         withSession { wallet ->
             atRest(wallet) { wallet.exportOutputs(filename, all) }
