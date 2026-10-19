@@ -778,7 +778,7 @@ keystone_ops = r'''    private fun requireActiveKeystone(): Pair<WalletInfo, Mon
     }
 
 '''
-insert_before(vm, "    fun send(flow: SendFlow, address: String, amount: Long, memo: String? = null, isSweepAll: Boolean = false) {\n", keystone_ops)
+insert_before(vm, "    fun send(\n        flow: SendFlow,\n        address: String,\n", keystone_ops)
 
 # ---------------------------------------------------------------------------
 # Pair entry points + hardware send handoff.
