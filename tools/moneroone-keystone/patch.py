@@ -1039,11 +1039,12 @@ insert_before(nav, "            composable(Screen.SetPin.route) {\n", pair_route
 
 rep(
     nav,
-    "                    onSent = {\n                        navController.navigate(Screen.Main.route) {\n                            popUpTo(Screen.Main.route) { inclusive = true }\n                        }\n                    }\n",
+    "                    onSent = {\n                        navController.navigate(Screen.Main.route) {\n                            popUpTo(Screen.Main.route) { inclusive = true }\n                        }\n                    },\n                    paymentLinks = paymentLinks,\n",
     "                    onSent = {\n                        navController.navigate(Screen.Main.route) {\n                            popUpTo(Screen.Main.route) { inclusive = true }\n                        }\n                    },\n"
     "                    onKeystoneSign = { dest, atomic, sweep ->\n"
     "                        navController.navigate(Screen.KeystoneSign.createRoute(dest, atomic, sweep))\n"
-    "                    }\n"
+    "                    },\n"
+    "                    paymentLinks = paymentLinks,\n"
 )
 
 sign_route = r'''
